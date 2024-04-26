@@ -19,4 +19,4 @@ uvicorn app:app
 
 The API listens at `http://127.0.0.1:8000`
 
-[Ariadne API](./ariadne_api.png)
+![Ariadne API](./ariadne_api.png)
