@@ -1,7 +1,8 @@
-from ariadne import QueryType, gql, make_executable_schema, ObjectType
-from ariadne.asgi import GraphQL
+from flask import Flask
+from flask_graphql import GraphQLView
+from graphene import List, ObjectType, Schema, String
 from loguru import logger
-from SPARQLWrapper import SPARQLWrapper, JSON
+from SPARQLWrapper import JSON, SPARQLWrapper
 
 
 sparql = SPARQLWrapper(
@@ -10,60 +11,59 @@ sparql = SPARQLWrapper(
 sparql.setReturnFormat(JSON)
 
 
-type_defs = gql("""
-    type Query {
-        animals(taxon: String!): [Animal]
-    }
-    
-    type Animal {
-        label: String!
-        abstract: String!
-    }
-""")
+class Animal(ObjectType):
+    label = String()
+    abstract = String()
+
+    def resolve_label(root, info):
+        return root['label']
+
+    def resolve_abstract(root, info):
+        return root['abstract']
 
 
-query = QueryType()
+class Query(ObjectType):
+    animals = List(Animal, taxon=String(required=True))
+
+    def resolve_animals(root, info, taxon):
+        logger.debug("Executing query for {}, root/info = {}/{}", taxon, root, info)
+        if taxon is None:
+            return []
+        query = (
+            'select ?label ?abstract where {'
+            '?name dbo:abstract ?abstract .'
+            '?name rdfs:label ?label .'
+            f'?name dbo:class / dbp:taxon "{taxon}"@en .'
+            'FILTER ( LANG ( ?abstract ) = "en" ) .'
+            'FILTER ( LANG ( ?label ) = "en" )'
+            '} limit 20'
+        )
+        sparql.setQuery(query)
+        ret = sparql.queryAndConvert()
+        logger.debug("Response from DBpedia: {!r:60.60}(...)", ret)
+        animals = ret["results"]["bindings"]
+        if not animals:
+            return []
+        return [
+            {
+                "label": a['label']['value'],
+                "abstract": a['abstract']['value']
+            }
+            for a in animals
+        ]
 
 
-@query.field("animals")
-def resolve_animal(*_, taxon=None):
-    if taxon is None:
-        return []
-    query = (
-        'select ?label ?abstract where {'
-        '?name dbo:abstract ?abstract .'
-        '?name rdfs:label ?label .'
-        f'?name dbo:class / dbp:taxon "{taxon}"@en .'
-        'FILTER ( LANG ( ?abstract ) = "en" ) .'
-        'FILTER ( LANG ( ?label ) = "en" )'
-        '} limit 20'
+schema = Schema(query=Query)
+
+
+def create_app():
+    app = Flask(__name__)
+    app.add_url_rule(
+        '/graphql',
+        view_func=GraphQLView.as_view(
+            'graphql',
+            schema=schema,
+            graphiql=True # for having the GraphiQL interface
+        )
     )
-    # logger.debug("Query: {}", query)
-    sparql.setQuery(query)
-    ret = sparql.queryAndConvert()
-    # logger.debug("Response: {}", ret)
-    animals = ret["results"]["bindings"]
-    if not animals:
-        return []
-    return [
-        {
-            "label": a['label']['value'],
-            "abstract": a['abstract']['value']
-        }
-        for a in animals
-    ]
-
-
-animal = ObjectType("Animal")
-
-@animal.field("abstract")
-def resolve_abstract(obj, *_):
-    return obj['abstract']
-
-@animal.field("label")
-def resolve_abstract(obj, *_):
-    return obj['label']
-
-
-schema = make_executable_schema(type_defs, query, animal)
-app = GraphQL(schema, debug=True)
+    return app
